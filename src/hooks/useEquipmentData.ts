@@ -3,10 +3,109 @@ import { hasSupabaseConfig, supabase } from '@/integrations/supabase/client';
 import { EquipmentDataset, EquipmentItem, EquipmentTypeCount } from '@/types/equipment';
 import { useToast } from '@/hooks/use-toast';
 
+function parseCSVFile(text: string, fileName: string): EquipmentItem[] {
+  const lines = text.trim().split('\n');
+  const headers = lines[0].split(',').map((h) => h.trim().toLowerCase());
+
+  if (headers.length === 0 || lines.length < 2) {
+    throw new Error('CSV file is empty or invalid');
+  }
+
+  let nameIdx = headers.findIndex(
+    (h) => h.includes('name') || h.includes('equipment') || h.includes('id') || h.includes('item'),
+  );
+  let typeIdx = headers.findIndex(
+    (h) => h.includes('type') || h.includes('category') || h.includes('class'),
+  );
+  let flowIdx = headers.findIndex((h) => h.includes('flow'));
+  let pressIdx = headers.findIndex((h) => h.includes('press'));
+  let tempIdx = headers.findIndex((h) => h.includes('temp'));
+
+  const rawRows = lines
+    .slice(1)
+    .map((l) => l.split(',').map((v) => v.trim()))
+    .filter((v) => v.some((c) => c !== ''));
+
+  const numericCols: number[] = [];
+  for (let c = 0; c < headers.length; c++) {
+    const vals = rawRows.map((r) => r[c]).filter((v) => v !== undefined && v !== '');
+    if (!vals.length) continue;
+    const numCount = vals.filter((v) => !isNaN(parseFloat(v)) && isFinite(Number(v))).length;
+    if (numCount / vals.length >= 0.6) numericCols.push(c);
+  }
+
+  if (nameIdx === -1) {
+    nameIdx = headers.findIndex((_, i) => !numericCols.includes(i));
+    if (nameIdx === -1) nameIdx = 0;
+  }
+  if (typeIdx === -1) {
+    typeIdx = headers.findIndex((_, i) => i !== nameIdx && !numericCols.includes(i));
+  }
+
+  const remainingNumeric = numericCols.filter((i) => i !== flowIdx && i !== pressIdx && i !== tempIdx);
+  if (flowIdx === -1 && remainingNumeric.length) flowIdx = remainingNumeric.shift()!;
+  if (pressIdx === -1 && remainingNumeric.length) pressIdx = remainingNumeric.shift()!;
+  if (tempIdx === -1 && remainingNumeric.length) tempIdx = remainingNumeric.shift()!;
+
+  const items: EquipmentItem[] = [];
+  for (let i = 0; i < rawRows.length; i++) {
+    const values = rawRows[i];
+    const name = nameIdx !== -1 && values[nameIdx] ? values[nameIdx] : `Row ${i + 1}`;
+    const type = typeIdx !== -1 && values[typeIdx] ? values[typeIdx] : headers[flowIdx] || 'Data';
+    items.push({
+      equipment_name: name,
+      equipment_type: type,
+      flowrate: flowIdx !== -1 ? parseFloat(values[flowIdx]) || null : null,
+      pressure: pressIdx !== -1 ? parseFloat(values[pressIdx]) || null : null,
+      temperature: tempIdx !== -1 ? parseFloat(values[tempIdx]) || null : null,
+    });
+  }
+
+  if (!items.length) {
+    throw new Error('No data rows found in CSV');
+  }
+
+  return items;
+}
+
+function buildDatasetSummary(fileName: string, items: EquipmentItem[]): EquipmentDataset {
+  const validFlowrates = items.filter((i) => i.flowrate !== null).map((i) => i.flowrate!);
+  const validPressures = items.filter((i) => i.pressure !== null).map((i) => i.pressure!);
+  const validTemps = items.filter((i) => i.temperature !== null).map((i) => i.temperature!);
+
+  const avgFlowrate =
+    validFlowrates.length > 0 ? validFlowrates.reduce((a, b) => a + b, 0) / validFlowrates.length : null;
+  const avgPressure =
+    validPressures.length > 0 ? validPressures.reduce((a, b) => a + b, 0) / validPressures.length : null;
+  const avgTemperature =
+    validTemps.length > 0 ? validTemps.reduce((a, b) => a + b, 0) / validTemps.length : null;
+
+  const typeCounts: Record<string, number> = {};
+  items.forEach((item) => {
+    typeCounts[item.equipment_type] = (typeCounts[item.equipment_type] || 0) + 1;
+  });
+  const equipmentTypes: EquipmentTypeCount[] = Object.entries(typeCounts).map(([type, count]) => ({
+    type,
+    count,
+  }));
+
+  return {
+    id: crypto.randomUUID(),
+    filename: fileName,
+    uploaded_at: new Date().toISOString(),
+    total_count: items.length,
+    avg_flowrate: avgFlowrate,
+    avg_pressure: avgPressure,
+    avg_temperature: avgTemperature,
+    equipment_types: equipmentTypes,
+  };
+}
+
 export function useEquipmentData() {
   const [datasets, setDatasets] = useState<EquipmentDataset[]>([]);
   const [currentDataset, setCurrentDataset] = useState<EquipmentDataset | null>(null);
   const [currentItems, setCurrentItems] = useState<EquipmentItem[]>([]);
+  const [localItemsByDatasetId, setLocalItemsByDatasetId] = useState<Record<string, EquipmentItem[]>>({});
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
 
@@ -41,11 +140,13 @@ export function useEquipmentData() {
   };
 
   const selectDataset = async (dataset: EquipmentDataset) => {
+    setCurrentDataset(dataset);
+
     if (!supabase) {
+      setCurrentItems(localItemsByDatasetId[dataset.id] || []);
       return;
     }
 
-    setCurrentDataset(dataset);
     setIsLoading(true);
 
     const { data, error } = await supabase
@@ -68,120 +169,59 @@ export function useEquipmentData() {
 
     try {
       const text = await file.text();
-      const lines = text.trim().split('\n');
-      const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
-
-      if (headers.length === 0 || lines.length < 2) {
-        throw new Error('CSV file is empty or invalid');
-      }
-
-      // Try to find known columns
-      let nameIdx = headers.findIndex(h => h.includes('name') || h.includes('equipment') || h.includes('id') || h.includes('item'));
-      let typeIdx = headers.findIndex(h => h.includes('type') || h.includes('category') || h.includes('class'));
-      let flowIdx = headers.findIndex(h => h.includes('flow'));
-      let pressIdx = headers.findIndex(h => h.includes('press'));
-      let tempIdx = headers.findIndex(h => h.includes('temp'));
-
-      // Parse all rows generically
-      const rawRows = lines.slice(1)
-        .map(l => l.split(',').map(v => v.trim()))
-        .filter(v => v.some(c => c !== ''));
-
-      // Detect numeric columns (>=60% of values numeric)
-      const numericCols: number[] = [];
-      for (let c = 0; c < headers.length; c++) {
-        const vals = rawRows.map(r => r[c]).filter(v => v !== undefined && v !== '');
-        if (!vals.length) continue;
-        const numCount = vals.filter(v => !isNaN(parseFloat(v)) && isFinite(Number(v))).length;
-        if (numCount / vals.length >= 0.6) numericCols.push(c);
-      }
-
-      // Fallbacks
-      if (nameIdx === -1) {
-        nameIdx = headers.findIndex((_, i) => !numericCols.includes(i));
-        if (nameIdx === -1) nameIdx = 0;
-      }
-      if (typeIdx === -1) {
-        typeIdx = headers.findIndex((_, i) => i !== nameIdx && !numericCols.includes(i));
-      }
-
-      const remainingNumeric = numericCols.filter(i => i !== flowIdx && i !== pressIdx && i !== tempIdx);
-      if (flowIdx === -1 && remainingNumeric.length) flowIdx = remainingNumeric.shift()!;
-      if (pressIdx === -1 && remainingNumeric.length) pressIdx = remainingNumeric.shift()!;
-      if (tempIdx === -1 && remainingNumeric.length) tempIdx = remainingNumeric.shift()!;
-
-      const items: EquipmentItem[] = [];
-      for (let i = 0; i < rawRows.length; i++) {
-        const values = rawRows[i];
-        const name = (nameIdx !== -1 && values[nameIdx]) ? values[nameIdx] : `Row ${i + 1}`;
-        const type = (typeIdx !== -1 && values[typeIdx]) ? values[typeIdx] : (headers[flowIdx] || 'Data');
-        items.push({
-          equipment_name: name,
-          equipment_type: type,
-          flowrate: flowIdx !== -1 ? (parseFloat(values[flowIdx]) || null) : null,
-          pressure: pressIdx !== -1 ? (parseFloat(values[pressIdx]) || null) : null,
-          temperature: tempIdx !== -1 ? (parseFloat(values[tempIdx]) || null) : null,
-        });
-      }
-
-      if (!items.length) {
-        throw new Error('No data rows found in CSV');
-      }
+      const items = parseCSVFile(text, file.name);
 
       if (!supabase) {
-        throw new Error('Supabase is not configured for this deployment. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY on Render.');
+        const dataset = buildDatasetSummary(file.name, items);
+        const itemsWithDatasetId = items.map((item) => ({ ...item, dataset_id: dataset.id }));
+
+        setLocalItemsByDatasetId((prev) => ({ ...prev, [dataset.id]: itemsWithDatasetId }));
+        setDatasets((prev) => [dataset, ...prev].slice(0, 5));
+        setCurrentDataset(dataset);
+        setCurrentItems(itemsWithDatasetId);
+
+        toast({
+          title: 'Upload Successful',
+          description: `Loaded ${items.length} records from ${file.name} (browser session only)`,
+        });
+        return;
       }
 
-      // Calculate summary statistics
-      const validFlowrates = items.filter(i => i.flowrate !== null).map(i => i.flowrate!);
-      const validPressures = items.filter(i => i.pressure !== null).map(i => i.pressure!);
-      const validTemps = items.filter(i => i.temperature !== null).map(i => i.temperature!);
+      const equipmentTypes = buildDatasetSummary(file.name, items).equipment_types;
+      const validFlowrates = items.filter((i) => i.flowrate !== null).map((i) => i.flowrate!);
+      const validPressures = items.filter((i) => i.pressure !== null).map((i) => i.pressure!);
+      const validTemps = items.filter((i) => i.temperature !== null).map((i) => i.temperature!);
 
-      const avgFlowrate = validFlowrates.length > 0 
-        ? validFlowrates.reduce((a, b) => a + b, 0) / validFlowrates.length 
-        : null;
-      const avgPressure = validPressures.length > 0 
-        ? validPressures.reduce((a, b) => a + b, 0) / validPressures.length 
-        : null;
-      const avgTemperature = validTemps.length > 0 
-        ? validTemps.reduce((a, b) => a + b, 0) / validTemps.length 
-        : null;
+      const avgFlowrate =
+        validFlowrates.length > 0 ? validFlowrates.reduce((a, b) => a + b, 0) / validFlowrates.length : null;
+      const avgPressure =
+        validPressures.length > 0 ? validPressures.reduce((a, b) => a + b, 0) / validPressures.length : null;
+      const avgTemperature =
+        validTemps.length > 0 ? validTemps.reduce((a, b) => a + b, 0) / validTemps.length : null;
 
-      // Count equipment types
-      const typeCounts: Record<string, number> = {};
-      items.forEach(item => {
-        typeCounts[item.equipment_type] = (typeCounts[item.equipment_type] || 0) + 1;
-      });
-      const equipmentTypes: EquipmentTypeCount[] = Object.entries(typeCounts).map(([type, count]) => ({
-        type,
-        count,
-      }));
-
-      // Insert dataset
       const { data: datasetData, error: datasetError } = await supabase
         .from('equipment_datasets')
-        .insert([{
-          filename: file.name,
-          total_count: items.length,
-          avg_flowrate: avgFlowrate,
-          avg_pressure: avgPressure,
-          avg_temperature: avgTemperature,
-          equipment_types: JSON.parse(JSON.stringify(equipmentTypes)),
-        }])
+        .insert([
+          {
+            filename: file.name,
+            total_count: items.length,
+            avg_flowrate: avgFlowrate,
+            avg_pressure: avgPressure,
+            avg_temperature: avgTemperature,
+            equipment_types: JSON.parse(JSON.stringify(equipmentTypes)),
+          },
+        ])
         .select()
         .single();
 
       if (datasetError) throw datasetError;
 
-      // Insert items
-      const itemsWithDatasetId = items.map(item => ({
+      const itemsWithDatasetId = items.map((item) => ({
         ...item,
         dataset_id: datasetData.id,
       }));
 
-      const { error: itemsError } = await supabase
-        .from('equipment_items')
-        .insert(itemsWithDatasetId);
+      const { error: itemsError } = await supabase.from('equipment_items').insert(itemsWithDatasetId);
 
       if (itemsError) throw itemsError;
 
@@ -191,13 +231,12 @@ export function useEquipmentData() {
       });
 
       await fetchDatasets();
-      
+
       const newDataset = {
         ...datasetData,
         equipment_types: equipmentTypes,
       };
       selectDataset(newDataset);
-
     } catch (error) {
       console.error('Upload error:', error);
       toast({
@@ -212,10 +251,21 @@ export function useEquipmentData() {
 
   const deleteDataset = async (id: string) => {
     if (!supabase) {
+      setDatasets((prev) => prev.filter((dataset) => dataset.id !== id));
+      setLocalItemsByDatasetId((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+
+      if (currentDataset?.id === id) {
+        setCurrentDataset(null);
+        setCurrentItems([]);
+      }
+
       toast({
-        title: 'Delete Failed',
-        description: 'Supabase is not configured for this deployment',
-        variant: 'destructive',
+        title: 'Dataset Deleted',
+        description: 'Dataset has been removed from this session',
       });
       return;
     }
