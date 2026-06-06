@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { supabase } from '@/integrations/supabase/client';
+import { hasSupabaseConfig, supabase } from '@/integrations/supabase/client';
 import { EquipmentDataset, EquipmentItem, EquipmentTypeCount } from '@/types/equipment';
 import { useToast } from '@/hooks/use-toast';
 
@@ -11,6 +11,13 @@ export function useEquipmentData() {
   const { toast } = useToast();
 
   const fetchDatasets = async () => {
+    if (!supabase) {
+      if (!hasSupabaseConfig) {
+        console.warn('Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY to enable persistence.');
+      }
+      return;
+    }
+
     const { data, error } = await supabase
       .from('equipment_datasets')
       .select('*')
@@ -34,6 +41,10 @@ export function useEquipmentData() {
   };
 
   const selectDataset = async (dataset: EquipmentDataset) => {
+    if (!supabase) {
+      return;
+    }
+
     setCurrentDataset(dataset);
     setIsLoading(true);
 
@@ -117,6 +128,10 @@ export function useEquipmentData() {
         throw new Error('No data rows found in CSV');
       }
 
+      if (!supabase) {
+        throw new Error('Supabase is not configured for this deployment. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY on Render.');
+      }
+
       // Calculate summary statistics
       const validFlowrates = items.filter(i => i.flowrate !== null).map(i => i.flowrate!);
       const validPressures = items.filter(i => i.pressure !== null).map(i => i.pressure!);
@@ -196,6 +211,15 @@ export function useEquipmentData() {
   };
 
   const deleteDataset = async (id: string) => {
+    if (!supabase) {
+      toast({
+        title: 'Delete Failed',
+        description: 'Supabase is not configured for this deployment',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     const { error } = await supabase
       .from('equipment_datasets')
       .delete()
