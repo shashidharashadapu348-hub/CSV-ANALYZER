@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react';
+import { startTransition, useState, useEffect } from 'react';
 import { hasSupabaseConfig, supabase } from '@/integrations/supabase/client';
+import { MAX_CSV_ROWS } from '@/lib/constants';
 import { EquipmentDataset, EquipmentItem, EquipmentTypeCount } from '@/types/equipment';
 import { useToast } from '@/hooks/use-toast';
 
-function parseCSVFile(text: string, fileName: string): EquipmentItem[] {
+function parseCSVFile(text: string): { items: EquipmentItem[]; totalRows: number; truncated: boolean } {
   const lines = text.trim().split('\n');
   const headers = lines[0].split(',').map((h) => h.trim().toLowerCase());
 
@@ -47,9 +48,12 @@ function parseCSVFile(text: string, fileName: string): EquipmentItem[] {
   if (pressIdx === -1 && remainingNumeric.length) pressIdx = remainingNumeric.shift()!;
   if (tempIdx === -1 && remainingNumeric.length) tempIdx = remainingNumeric.shift()!;
 
+  const totalRows = rawRows.length;
+  const rowsToParse = rawRows.slice(0, MAX_CSV_ROWS);
   const items: EquipmentItem[] = [];
-  for (let i = 0; i < rawRows.length; i++) {
-    const values = rawRows[i];
+
+  for (let i = 0; i < rowsToParse.length; i++) {
+    const values = rowsToParse[i];
     const name = nameIdx !== -1 && values[nameIdx] ? values[nameIdx] : `Row ${i + 1}`;
     const type = typeIdx !== -1 && values[typeIdx] ? values[typeIdx] : headers[flowIdx] || 'Data';
     items.push({
@@ -65,7 +69,7 @@ function parseCSVFile(text: string, fileName: string): EquipmentItem[] {
     throw new Error('No data rows found in CSV');
   }
 
-  return items;
+  return { items, totalRows, truncated: totalRows > MAX_CSV_ROWS };
 }
 
 function buildDatasetSummary(fileName: string, items: EquipmentItem[]): EquipmentDataset {
@@ -169,20 +173,27 @@ export function useEquipmentData() {
 
     try {
       const text = await file.text();
-      const items = parseCSVFile(text, file.name);
+      const { items, totalRows, truncated } = parseCSVFile(text);
+      const rowNote = truncated ? ` (showing first ${MAX_CSV_ROWS} of ${totalRows} rows)` : '';
+
+      const applyLocalUpload = (dataset: EquipmentDataset, itemsWithDatasetId: EquipmentItem[]) => {
+        startTransition(() => {
+          setLocalItemsByDatasetId((prev) => ({ ...prev, [dataset.id]: itemsWithDatasetId }));
+          setDatasets((prev) => [dataset, ...prev].slice(0, 5));
+          setCurrentDataset(dataset);
+          setCurrentItems(itemsWithDatasetId);
+        });
+      };
 
       if (!supabase) {
         const dataset = buildDatasetSummary(file.name, items);
         const itemsWithDatasetId = items.map((item) => ({ ...item, dataset_id: dataset.id }));
 
-        setLocalItemsByDatasetId((prev) => ({ ...prev, [dataset.id]: itemsWithDatasetId }));
-        setDatasets((prev) => [dataset, ...prev].slice(0, 5));
-        setCurrentDataset(dataset);
-        setCurrentItems(itemsWithDatasetId);
+        applyLocalUpload(dataset, itemsWithDatasetId);
 
         toast({
           title: 'Upload Successful',
-          description: `Loaded ${items.length} records from ${file.name} (browser session only)`,
+          description: `Loaded ${items.length} records from ${file.name}${rowNote} (browser session)`,
         });
         return;
       }
@@ -227,7 +238,7 @@ export function useEquipmentData() {
 
       toast({
         title: 'Upload Successful',
-        description: `Loaded ${items.length} equipment records from ${file.name}`,
+        description: `Loaded ${items.length} equipment records from ${file.name}${rowNote}`,
       });
 
       await fetchDatasets();
@@ -236,7 +247,9 @@ export function useEquipmentData() {
         ...datasetData,
         equipment_types: equipmentTypes,
       };
-      selectDataset(newDataset);
+      startTransition(() => {
+        selectDataset(newDataset);
+      });
     } catch (error) {
       console.error('Upload error:', error);
       toast({

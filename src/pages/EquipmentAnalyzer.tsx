@@ -1,3 +1,4 @@
+import { lazy, Suspense, useDeferredValue } from 'react';
 import { useEquipmentData } from '@/hooks/useEquipmentData';
 import { CSVUploader } from '@/components/equipment/CSVUploader';
 import { SummaryCards } from '@/components/equipment/SummaryCards';
@@ -5,10 +6,12 @@ import { EquipmentTable } from '@/components/equipment/EquipmentTable';
 import { EquipmentCharts } from '@/components/equipment/EquipmentCharts';
 import { MetricHistograms } from '@/components/equipment/MetricHistograms';
 import { TextReport } from '@/components/equipment/TextReport';
-import { NLPAnalysis } from '@/components/equipment/NLPAnalysis';
 import { DatasetHistory } from '@/components/equipment/DatasetHistory';
 import { ThemeToggle } from '@/components/ThemeToggle';
-import { Table2 } from 'lucide-react';
+
+const NLPAnalysis = lazy(() =>
+  import('@/components/equipment/NLPAnalysis').then((m) => ({ default: m.NLPAnalysis })),
+);
 
 export default function EquipmentAnalyzer() {
   const {
@@ -20,6 +23,9 @@ export default function EquipmentAnalyzer() {
     selectDataset,
     deleteDataset,
   } = useEquipmentData();
+
+  const deferredItems = useDeferredValue(currentItems);
+  const showAnalysis = deferredItems.length > 0;
 
   return (
     <div className="min-h-screen bg-background">
@@ -53,15 +59,23 @@ export default function EquipmentAnalyzer() {
 
         <SummaryCards dataset={currentDataset} />
 
-        <EquipmentCharts dataset={currentDataset} items={currentItems} />
-
-        <MetricHistograms items={currentItems} />
-
-        <TextReport dataset={currentDataset} items={currentItems} />
-
-        <NLPAnalysis items={currentItems} />
-
-        <EquipmentTable items={currentItems} isLoading={isLoading} />
+        {showAnalysis && (
+          <>
+            <EquipmentCharts dataset={currentDataset} items={deferredItems} />
+            <MetricHistograms items={deferredItems} />
+            <TextReport dataset={currentDataset} items={deferredItems} />
+            <Suspense
+              fallback={
+                <div className="rounded-lg border border-border bg-card p-8 text-center text-muted-foreground">
+                  Loading NLP analysis…
+                </div>
+              }
+            >
+              <NLPAnalysis items={deferredItems} />
+            </Suspense>
+            <EquipmentTable items={deferredItems} isLoading={isLoading} />
+          </>
+        )}
       </main>
     </div>
   );

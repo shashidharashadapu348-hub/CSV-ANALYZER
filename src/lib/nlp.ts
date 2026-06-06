@@ -160,34 +160,58 @@ export function pca2D(X: number[][]): { x: number; y: number }[] {
   }));
 }
 
+const TSNE_MAX_POINTS = 120;
+const TSNE_MAX_ITERS = 15;
+
 // Simple t-SNE-ish projection: PCA init + a few attraction/repulsion iterations
-export function tsne2D(X: number[][], iters = 60): { x: number; y: number }[] {
-  const pts = pca2D(X).map((p) => ({ x: p.x, y: p.y }));
+export function tsne2D(X: number[][], iters = TSNE_MAX_ITERS): { x: number; y: number }[] {
+  const sample = X.length > TSNE_MAX_POINTS
+    ? X.filter((_, i) => i % Math.ceil(X.length / TSNE_MAX_POINTS) === 0).slice(0, TSNE_MAX_POINTS)
+    : X;
+
+  const pts = pca2D(sample).map((p) => ({ x: p.x, y: p.y }));
   if (pts.length < 2) return pts;
-  // normalize
-  const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+
+  const xs = pts.map((p) => p.x);
+  const ys = pts.map((p) => p.y);
   const sx = Math.max(...xs) - Math.min(...xs) || 1;
   const sy = Math.max(...ys) - Math.min(...ys) || 1;
-  pts.forEach((p) => { p.x /= sx; p.y /= sy; });
-  // pairwise high-D similarities (cosine)
+  pts.forEach((p) => {
+    p.x /= sx;
+    p.y /= sy;
+  });
+
   const dot = (a: number[], b: number[]) => a.reduce((s, v, i) => s + v * b[i], 0);
-  const n = X.length;
-  const sims: number[][] = X.map((a) => X.map((b) => {
-    const na = Math.sqrt(dot(a, a)) || 1; const nb = Math.sqrt(dot(b, b)) || 1;
-    return dot(a, b) / (na * nb);
-  }));
+  const n = sample.length;
+  const cappedIters = Math.min(iters, TSNE_MAX_ITERS);
+  const sims: number[][] = sample.map((a) =>
+    sample.map((b) => {
+      const na = Math.sqrt(dot(a, a)) || 1;
+      const nb = Math.sqrt(dot(b, b)) || 1;
+      return dot(a, b) / (na * nb);
+    }),
+  );
+
   const lr = 0.05;
-  for (let it = 0; it < iters; it++) {
+  for (let it = 0; it < cappedIters; it++) {
     const grads = pts.map(() => ({ x: 0, y: 0 }));
-    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
-      if (i === j) continue;
-      const dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y;
-      const d2 = dx * dx + dy * dy + 1e-6;
-      const q = 1 / (1 + d2);
-      const f = (sims[i][j] - q) * q;
-      grads[i].x += f * dx; grads[i].y += f * dy;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const dx = pts[i].x - pts[j].x;
+        const dy = pts[i].y - pts[j].y;
+        const d2 = dx * dx + dy * dy + 1e-6;
+        const q = 1 / (1 + d2);
+        const f = (sims[i][j] - q) * q;
+        grads[i].x += f * dx;
+        grads[i].y += f * dy;
+        grads[j].x -= f * dx;
+        grads[j].y -= f * dy;
+      }
     }
-    grads.forEach((g, i) => { pts[i].x += lr * g.x; pts[i].y += lr * g.y; });
+    grads.forEach((g, i) => {
+      pts[i].x += lr * g.x;
+      pts[i].y += lr * g.y;
+    });
   }
   return pts;
 }

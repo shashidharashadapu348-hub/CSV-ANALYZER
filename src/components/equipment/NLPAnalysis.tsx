@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { EquipmentItem } from '@/types/equipment';
+import { MAX_NLP_SAMPLE } from '@/lib/constants';
 import {
   tokenize, removeStopwords, stem, lemmatize, ngrams, topK,
   posTag, extractEntities, tfidf, pca2D, tsne2D,
@@ -21,12 +22,18 @@ const TYPE_COLORS = ['#3b82f6', '#f59e0b', '#ef4444', '#22c55e', '#8b5cf6', '#06
 export function NLPAnalysis({ items }: Props) {
   const [activeTab, setActiveTab] = useState('tokens');
 
-  const docs = useMemo(() => items.map((i) => `${i.equipment_name} ${i.equipment_type}`), [items]);
+  const sampleItems = useMemo(
+    () => (items.length > MAX_NLP_SAMPLE ? items.slice(0, MAX_NLP_SAMPLE) : items),
+    [items],
+  );
+
+  const docs = useMemo(
+    () => sampleItems.map((i) => `${i.equipment_name} ${i.equipment_type}`),
+    [sampleItems],
+  );
   const docTokens = useMemo(() => docs.map((d) => removeStopwords(tokenize(d))), [docs]);
   const allTokens = useMemo(() => docTokens.flat(), [docTokens]);
-
-  const stems = useMemo(() => allTokens.map(stem), [allTokens]);
-  const lemmas = useMemo(() => allTokens.map(lemmatize), [allTokens]);
+  const previewTokens = useMemo(() => allTokens.slice(0, 60), [allTokens]);
 
   const uni = useMemo(() => topK(allTokens, 12), [allTokens]);
   const bi = useMemo(() => topK(docTokens.flatMap((d) => ngrams(d, 2)), 12), [docTokens]);
@@ -49,24 +56,34 @@ export function NLPAnalysis({ items }: Props) {
       .sort((a, b) => b.count - a.count).slice(0, 20);
   }, [docs]);
 
-  // TF-IDF + PCA / t-SNE
-  const { matrix } = useMemo(() => tfidf(docTokens), [docTokens]);
-  const pcaPts = useMemo(() => pca2D(matrix), [matrix]);
-  const tsnePts = useMemo(() => tsne2D(matrix, 50), [matrix]);
+  const embedReady = activeTab === 'embed';
+  const { matrix } = useMemo(
+    () => (embedReady ? tfidf(docTokens) : { matrix: [] as number[][] }),
+    [docTokens, embedReady],
+  );
+  const pcaPts = useMemo(
+    () => (embedReady && matrix.length ? pca2D(matrix) : []),
+    [matrix, embedReady],
+  );
+  const tsnePts = useMemo(
+    () => (embedReady && matrix.length ? tsne2D(matrix) : []),
+    [matrix, embedReady],
+  );
+
   const typeIndex = useMemo(() => {
-    const types = [...new Set(items.map((i) => i.equipment_type))];
+    const types = [...new Set(sampleItems.map((i) => i.equipment_type))];
     return new Map(types.map((t, i) => [t, i]));
-  }, [items]);
+  }, [sampleItems]);
+
   const groupedScatter = (pts: { x: number; y: number }[]) => {
     const groups: Record<string, { x: number; y: number; name: string }[]> = {};
     pts.forEach((p, i) => {
-      const t = items[i]?.equipment_type || 'Unknown';
-      (groups[t] ||= []).push({ ...p, name: items[i]?.equipment_name || '' });
+      const t = sampleItems[i]?.equipment_type || 'Unknown';
+      (groups[t] ||= []).push({ ...p, name: sampleItems[i]?.equipment_name || '' });
     });
     return groups;
   };
 
-  // Box plot — document/token-length stats
   const docLengths = docTokens.map((d) => d.length);
   const charLengths = docs.map((d) => d.length);
   const boxStats = [
@@ -74,17 +91,18 @@ export function NLPAnalysis({ items }: Props) {
     { label: 'Chars/doc', ...(quantiles(charLengths) || { min: 0, q1: 0, median: 0, q3: 0, max: 0 }) },
   ];
 
-  // Training curves (simulated for LSTM/BiLSTM visualization)
-  const training = useMemo(() => simulateTrainingCurve(20, items.length || 1), [items.length]);
+  const evalReady = activeTab === 'eval';
+  const training = useMemo(
+    () => (evalReady ? simulateTrainingCurve(20, sampleItems.length || 1) : []),
+    [sampleItems.length, evalReady],
+  );
 
-  // Confusion matrix — predict equipment_type from majority class of first 3 tokens
   const conf = useMemo(() => {
-    if (items.length < 3) return null;
-    const labels = items.map((i) => i.equipment_type);
-    // crude "predictor": same as label with 20% noise → demo only
+    if (!evalReady || sampleItems.length < 3) return null;
+    const labels = sampleItems.map((i) => i.equipment_type);
     const preds = labels.map((l, i) => (i % 5 === 0 ? labels[(i + 1) % labels.length] : l));
     return confusionMatrix(labels, preds);
-  }, [items]);
+  }, [sampleItems, evalReady]);
 
   if (!items.length) return null;
 
@@ -110,6 +128,11 @@ export function NLPAnalysis({ items }: Props) {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Brain className="h-5 w-5" /> NLP Analysis
+          {items.length > MAX_NLP_SAMPLE && (
+            <span className="text-xs font-normal text-muted-foreground">
+              (sampled {MAX_NLP_SAMPLE} of {items.length} rows)
+            </span>
+          )}
         </CardTitle>
       </CardHeader>
       <CardContent>
@@ -129,23 +152,23 @@ export function NLPAnalysis({ items }: Props) {
                 <CardContent className="text-xs">
                   <p className="text-muted-foreground mb-2">Total tokens: <span className="font-mono text-foreground">{allTokens.length}</span> · Unique: <span className="font-mono text-foreground">{new Set(allTokens).size}</span></p>
                   <div className="flex flex-wrap gap-1 max-h-40 overflow-y-auto">
-                    {allTokens.slice(0, 60).map((t, i) => <Badge key={i} variant="outline" className="text-[10px]">{t}</Badge>)}
+                    {previewTokens.map((t, i) => <Badge key={i} variant="outline" className="text-[10px]">{t}</Badge>)}
                   </div>
                 </CardContent>
               </Card>
               <Card><CardHeader><CardTitle className="text-sm">Stemming (Porter)</CardTitle></CardHeader>
                 <CardContent className="text-xs">
-                  <p className="text-muted-foreground mb-2">Unique stems: <span className="font-mono text-foreground">{new Set(stems).size}</span></p>
+                  <p className="text-muted-foreground mb-2">Preview stems from first tokens</p>
                   <div className="space-y-1 max-h-40 overflow-y-auto font-mono">
-                    {allTokens.slice(0, 12).map((t, i) => <div key={i}>{t} → <span className="text-primary">{stems[i]}</span></div>)}
+                    {previewTokens.slice(0, 12).map((t, i) => <div key={i}>{t} → <span className="text-primary">{stem(t)}</span></div>)}
                   </div>
                 </CardContent>
               </Card>
               <Card><CardHeader><CardTitle className="text-sm">Lemmatization</CardTitle></CardHeader>
                 <CardContent className="text-xs">
-                  <p className="text-muted-foreground mb-2">Unique lemmas: <span className="font-mono text-foreground">{new Set(lemmas).size}</span></p>
+                  <p className="text-muted-foreground mb-2">Preview lemmas from first tokens</p>
                   <div className="space-y-1 max-h-40 overflow-y-auto font-mono">
-                    {allTokens.slice(0, 12).map((t, i) => <div key={i}>{t} → <span className="text-primary">{lemmas[i]}</span></div>)}
+                    {previewTokens.slice(0, 12).map((t, i) => <div key={i}>{t} → <span className="text-primary">{lemmatize(t)}</span></div>)}
                   </div>
                 </CardContent>
               </Card>
