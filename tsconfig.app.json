@@ -25,6 +25,7 @@
         "./src/*"
       ]
     }
+    ,"types": ["node", "vite/client"]
   },
   "include": [
     "src"
