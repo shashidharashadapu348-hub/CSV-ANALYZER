@@ -11,29 +11,9 @@ export default defineConfig(({ mode }) => ({
     port: 8080,
   },
   build: {
+    // Avoid custom manualChunks — Render was serving index.html but 404'ing
+    // the react-vendor chunk, which leaves a blank white screen.
     chunkSizeWarningLimit: 2000,
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (!id.includes("node_modules")) return;
-
-          if (id.includes("/react-dom/") || id.includes("/react/")) {
-            return "react-vendor";
-          }
-          if (id.includes("recharts")) return "charts-vendor";
-          if (id.includes("@radix-ui")) return "radix-vendor";
-          if (
-            id.includes("@supabase") ||
-            id.includes("@tanstack/react-query") ||
-            id.includes("react-router")
-          ) {
-            return "app-vendor";
-          }
-
-          return "vendor";
-        },
-      },
-    },
   },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
   resolve: {
