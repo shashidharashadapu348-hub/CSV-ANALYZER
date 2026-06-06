@@ -11,20 +11,26 @@ export default defineConfig(({ mode }) => ({
     port: 8080,
   },
   build: {
-    chunkSizeWarningLimit: 1600,
+    chunkSizeWarningLimit: 2000,
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes("node_modules")) {
-            if (id.includes("react-dom") || id.includes("react")) return "react-vendor";
-            if (id.includes("@radix-ui")) return "radix-vendor";
-            if (id.includes("@supabase") || id.includes("@tanstack/react-query") || id.includes("react-router-dom")) {
-              return "app-vendor";
-            }
-            if (id.includes("recharts")) return "charts-vendor";
+          if (!id.includes("node_modules")) return;
 
-            return "vendor";
+          if (id.includes("/react-dom/") || id.includes("/react/")) {
+            return "react-vendor";
           }
+          if (id.includes("recharts")) return "charts-vendor";
+          if (id.includes("@radix-ui")) return "radix-vendor";
+          if (
+            id.includes("@supabase") ||
+            id.includes("@tanstack/react-query") ||
+            id.includes("react-router")
+          ) {
+            return "app-vendor";
+          }
+
+          return "vendor";
         },
       },
     },
